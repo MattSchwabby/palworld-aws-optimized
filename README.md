@@ -27,10 +27,6 @@ At about 20 hours of play per week, on the defaults:
 | Backups, Lambda, CloudWatch | $0.15 |
 | **Total** | **about $7/month** |
 
-Nothing is reserved on your behalf. Players find the server by name in Palworld's
-own browser, so there is no Elastic IP sitting there billing $3.60/month and no
-domain to buy. Storage is the only line that accrues while the server sleeps.
-
 Turning on [enhanced monitoring](#enhanced-monitoring-optional) adds roughly $2, and
 switching to an [Elastic IP](#elastic-ip) adds $3.60.
 
@@ -44,7 +40,8 @@ backups to make that survivable.
 
 ## Getting started
 
-You need Node 18 or newer and an AWS account.
+You need [Node 18 or newer](https://nodejs.org/en/download) and an
+[AWS account](https://portal.aws.amazon.com/billing/signup).
 
 Sign in however you normally do. Everything here uses the AWS CLI's own credential
 chain, so an existing profile or SSO session already works:
@@ -71,16 +68,14 @@ Out of the box that gives you a server players find by name in Palworld's own
 Community Servers browser, with no domain and no fixed IP to pay for. Make the name
 distinctive, because players search for it exactly.
 
-Leave `account` empty. It picks up whichever AWS account your credentials belong to.
-
-`config.local.ts` is gitignored, so your password stays out of version control.
-Deploying the template untouched fails right away with a list of what is still a
-placeholder.
-
 ```bash
 npx cdk bootstrap     # once per account and region
 scripts/deploy.sh
 ```
+
+First boot takes about ten minutes, because it installs Docker and pulls a 5.4 GB
+image. Later starts take about two. When it finishes, `scripts/how-to-connect.sh`
+prints the server name, the password, and how to join.
 
 ### If you have more than one AWS account
 
@@ -93,17 +88,6 @@ Put explicit keys in `.env`. They clear the inherited values and always win. See
 Then fill in `account` with your 12-digit account ID rather than leaving it empty.
 The CDK CLI refuses to deploy when your credentials resolve to a different account,
 so a mistake fails immediately instead of building a server in the wrong place.
-
-First boot takes about ten minutes, because it installs Docker and pulls a 5.4 GB
-image. Later starts take about two.
-
-When it finishes, `scripts/how-to-connect.sh` prints how to join, plus the server
-name and password. On the default `server-list` mode that means **Join Multiplayer
-Game**, then **Community Servers**, then searching your server name.
-
-If you switch to an addressing mode that gives you an address, players type it into
-the field at the bottom of Join Multiplayer Game instead. Always include the port:
-Palworld will not connect to a bare hostname, and it ignores SRV records.
 
 ## Three ways players reach the server
 
@@ -185,8 +169,8 @@ dig NS palworld.yourdomain.com +short
 The first connection attempt always fails. That attempt is what wakes the server.
 Wait about two minutes and join again.
 
-Only PC players get this. See [waking the server](#waking-the-server) for why console
-players still need the start page.
+Only PC players get this. Consoles never make a lookup you can watch, so they still
+need the [start page](#waking-the-server).
 
 Worth knowing: anything that resolves the name starts the server, including DNS
 scanners and uptime monitors. A spurious wake costs about 1.4 cents and then the
@@ -213,19 +197,15 @@ Every direction leaves the instance and its disks alone.
 
 ## Waking the server
 
-A sleeping server has to be started by something. There are two mechanisms and they
-cover different players.
+A sleeping server has to be started by something. In `route53` mode a joining PC
+player's DNS lookup does it. Otherwise, and for consoles in every mode, it is the
+start page.
 
-**The start page** is on by default in every addressing mode. It is a small web page
+The start page is on by default in every addressing mode. It is a small web page
 with one button, served by a Lambda Function URL. The link comes out as
 `StartPageUrl` after a deploy and looks like
 `https://xyz.lambda-url.us-west-2.on.aws/?t=your-token`. Send it to whoever plays
 with you. It reports what the server is doing and starts it if it is asleep.
-
-It reads two things, because they disagree for the whole of a boot: EC2 says whether
-the box is on, and the player metric says whether the game itself is answering. A
-running instance is not a joinable server, and the gap between them is most of the
-wait.
 
 | What you see | What it means |
 |---|---|
@@ -235,62 +215,14 @@ wait.
 | **Going to sleep** | Mid-shutdown. Wait for it to finish, then start it again. |
 | **Not responding** | The box is up but the game is not answering, past `bootGraceMinutes`. The watchdog stops it shortly. |
 
-Every state except Awake and Asleep reloads itself every fifteen seconds, so someone
-who presses the button and leaves the tab open sees it turn Awake on its own. Two
-people pressing at once is fine: the second one gets the starting page rather than an
-error.
+## Connecting to the server
 
-The countdown to sleep is reconstructed by counting back through the player metric,
-since the real counter lives in `/run` on the instance and is not published. A missed
-publish makes the estimate read low rather than high.
+In Palworld, choose **Join Multiplayer Game**, then **Community Servers**, search your
+exact `serverName`, and enter the password. That is the same on PC, PS5, and Xbox.
 
-None of this needs [enhanced monitoring](#enhanced-monitoring-optional). The player
-metric comes from `idle-check.sh`, which every server runs because the idle shutdown
-depends on it; enhanced monitoring only adds memory, swap, and disk. If the metric is
-ever unreadable the page falls back to instance state alone, which is what it used to
-report, so it degrades rather than breaks.
-
-There is no login on that page. The token in the URL is the only guard, so make it
-long. The worst somebody with the link can do is start your server, which then puts
-itself back to sleep after the idle timeout. `scripts/start.sh` does the same job
-from a terminal.
-
-**Wake-on-connect** only exists in `route53` mode, and only helps PC players. Their
-game resolves your hostname before connecting, and that DNS lookup is what starts the
-instance.
-
-It is worth being clear about why the start page stays on even with `route53`
-configured. Consoles never perform a lookup you can watch, and the Community Servers
-browser only lists servers that are already awake, so to a PS5 or Xbox player a
-sleeping server does not exist. They have no way to trigger a wake from inside the
-game. The link is the only route they have.
-
-## Playing from PS5 or Xbox
-
-Consoles have no field for typing an address, so they can only join servers that
-appear in the in-game browser. Set `communityServer.enabled` to true, which is the
-default.
-
-That adds the `-publiclobby` startup flag and sets
-`CrossplayPlatforms=(Steam,Xbox,PS5,Mac)` explicitly, so a future change to
-Pocketpair's default cannot quietly lock console players out. It also opens UDP
-27015 alongside the game port.
-
-The flow for a console player:
-
-1. Open the start page link and press the button.
-2. Leave the page open. It refreshes itself and says **Awake** once the server is
-   actually joinable, which saves guessing at two minutes and searching a browser
-   that does not list the server yet.
-3. In Palworld, **Join Multiplayer Game**, then **Community Servers**.
-4. Search the exact `serverName`.
-5. Select it and enter the password.
-
-Two caveats. Pocketpair's own docs never mention UDP 27015, though every hosting
-guide treats it as required for the browser listing, so this stack opens it
-defensively. And when Pocketpair ship a patch, consoles sometimes get it hours after
-Steam; until the versions line up, some players cannot connect regardless of
-configuration.
+On `elastic-ip` or `route53`, PC players can instead type the address into the field
+at the bottom of Join Multiplayer Game. Always include the port: Palworld will not
+connect to a bare hostname, and it ignores SRV records.
 
 ## How the timeout works
 
@@ -339,11 +271,6 @@ Most deploys are invisible to players. It depends on which resource changed.
 Runtime settings are published to SSM Parameter Store, and the instance reads them
 when it boots. A running server keeps whatever it started with. Nothing gets swapped
 out underneath your players.
-
-DNS survives deploys too. The CloudFormation template holds a placeholder address,
-but CloudFormation only writes a resource when the template changes and does not
-correct drift, so a live record keeps its real value. If it ever did get reset, the
-on-instance timer puts it back within five minutes.
 
 ### Applying config without waiting
 
@@ -507,29 +434,6 @@ tunnels over the instance's outbound connection, so the only inbound rule is UDP
 The admin password is generated on the instance at first boot and stored only on the
 save volume. It is never in this repo, never in Secrets Manager, never in a stack
 output.
-
-## Why EC2 and not Fargate
-
-Containers are the right instinct here, and the official image is what makes EC2 the
-better host for them.
-
-That image carries a 5.4 GB compressed layer, 7.3 GB on disk once unpacked, and it
-is x86 only. Fargate does not cache images, so every cold start would re-pull all of it
-before the game began loading. On EC2 the image sits on the root volume and a
-stop-start resumes in about 90 seconds. Fargate also works out more expensive for
-this shape of workload, and its public IP changes on every task, which would need a
-load balancer or DNS rewriting anyway.
-
-Docker is doing a narrow job in this stack. There is no orchestration, no scaling,
-and on a single-tenant box the container is not a security boundary anyone is
-relying on. What it gives you is a build Pocketpair already resolved, pinned to an
-exact version, identical on every rebuild. The alternative is SteamCMD and its
-32-bit library dependencies, plus no easy way to pin an older build when a game
-update breaks something.
-
-The AWS Marketplace listing for Palworld is also an EC2 AMI rather than a container,
-running docker-compose internally around this same open-source image, with an hourly
-software fee on top. This stack runs the official image directly.
 
 ## Layout
 
