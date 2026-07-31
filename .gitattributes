@@ -1,0 +1,13 @@
+# Everything that runs on the Linux instance must keep LF endings.
+#
+# A CRLF shebang fails with `/usr/bin/env: 'bash\r': No such file or directory`,
+# which takes the whole bootstrap down on the next boot. Easy to introduce by
+# accident when editing from Windows.
+*.sh text eol=lf
+*.py text eol=lf
+
+# Normalise the rest, and never touch binaries.
+* text=auto
+*.png binary
+*.jpg binary
+*.zip binary

@@ -1,0 +1,35 @@
+# Secrets and machine-specific settings
+.env
+.env.*
+!.env.example
+
+# Your own config, kept out of the repo. Either convention works:
+#   lib/config.local.ts   (single file)
+#   private/              (a directory, if you want more than one)
+lib/config.local.ts
+private/
+
+# CDK
+cdk.out/
+.cdk.staging/
+# Caches account-specific lookups, such as AMI ids keyed by account and region.
+cdk.context.json
+
+# Build output. All of it is recreated by `npm install` and `tsc`.
+node_modules/
+*.js
+*.d.ts
+*.tsbuildinfo
+
+# Python bytecode. Editing a Lambda locally leaves these next to the source, and
+# they would otherwise ship in the deployment asset.
+__pycache__/
+*.pyc
+
+*.log
+
+# Editor and OS noise
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
