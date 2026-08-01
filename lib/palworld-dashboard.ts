@@ -110,6 +110,37 @@ export class PalworldDashboard extends Construct {
       }),
     );
 
+    // The most direct answer to "is the game actually up", and the one thing the EC2
+    // metrics cannot give you: CPU and status checks stay green with a crashed game.
+    // Published every minute by a timer that runs whether or not the game is alive,
+    // which is what makes the zero an observation rather than a gap.
+    const gameUp = new cloudwatch.Metric({
+      namespace: props.metricNamespace,
+      metricName: props.healthMetricName,
+      dimensionsMap: { InstanceId: props.instanceId },
+      statistic: 'Minimum',
+      period: cdk.Duration.minutes(1),
+      region: props.serverRegion,
+      label: 'Game answering',
+    });
+
+    dashboard.addWidgets(
+      new cloudwatch.SingleValueWidget({
+        title: 'Game up: 1 joinable, 0 not answering, blank asleep',
+        width: 6,
+        height: 6,
+        metrics: [gameUp],
+        setPeriodToTimeRange: false,
+      }),
+      new cloudwatch.GraphWidget({
+        title: `Game answering (${eventCaption(EVENT_ALARMS.unresponsive, 'if awake and not answering')})`,
+        width: 18,
+        height: 6,
+        left: [gameUp],
+        leftYAxis: { min: 0, max: 1, label: '1 = up', showUnits: false },
+      }),
+    );
+
     dashboard.addWidgets(
       new cloudwatch.SingleValueWidget({
         title: 'Players online now',
