@@ -5,9 +5,6 @@ Pocketpair's official container image on EC2, keeps your world on a volume that
 survives everything, and costs somewhere around $7 a month if you play a few
 evenings a week.
 
-No domain and no static IP needed. Players find it by name in Palworld's own server
-browser, which also means PS5 and Xbox players can join.
-
 Infrastructure is AWS CDK in TypeScript. You edit one config file and run one
 script.
 
@@ -28,7 +25,7 @@ At about 20 hours of play per week, on the defaults:
 | **Total** | **about $7/month** |
 
 Turning on [enhanced monitoring](#enhanced-monitoring-optional) adds roughly $2, and
-switching to an [Elastic IP](#elastic-ip) adds $3.60.
+switching to an [Elastic IP](#three-ways-players-reach-the-server) adds $3.60.
 
 ### The free tier will not work
 
@@ -43,7 +40,7 @@ backups to make that survivable.
 You need [Node 18 or newer](https://nodejs.org/en/download) and an
 [AWS account](https://portal.aws.amazon.com/billing/signup).
 
-Sign in however you normally do. Everything here uses the AWS CLI's own credential
+Sign in to AWS using the CLI. Everything here uses the AWS CLI's own credential
 chain, so an existing profile or SSO session already works:
 
 ```bash
@@ -77,143 +74,39 @@ First boot takes about ten minutes, because it installs Docker and pulls a 5.4 G
 image. Later starts take about two. When it finishes, `scripts/how-to-connect.sh`
 prints the server name, the password, and how to join.
 
-### If you have more than one AWS account
-
-Some tooling sets `AWS_PROFILE` or `AWS_SESSION_TOKEN` in your shell, and that can
-send a deploy somewhere you did not intend. Two things help.
-
-Put explicit keys in `.env`. They clear the inherited values and always win. See
-`.env.example` for all three credential options.
-
-Then fill in `account` with your 12-digit account ID rather than leaving it empty.
-The CDK CLI refuses to deploy when your credentials resolve to a different account,
-so a mistake fails immediately instead of building a server in the wrong place.
-
-## Three ways players reach the server
-
-Set `addressing` in your config. Pick before your first deploy, because changing it
-later changes how players reach you.
-
-| Mode | Extra cost | Needs | Wakes on its own |
-|---|---|---|---|
-| `server-list` (default) | nothing | nothing | no |
-| `elastic-ip` | $3.60/mo | nothing | no |
-| `route53` | ~$0.50/mo | a domain you own | yes, for PC players |
-
-### server-list, the default
-
-The server registers itself in Palworld's Community Servers browser and players find
-it by searching your `serverName`. Nothing is allocated, so there is no address to
-pay for and no DNS to configure. A changing public IP stops mattering, because the
-server re-advertises itself every time it starts.
-
-Make `serverName` distinctive. Players search for it by exact name, and the browser
-only returns the first 200 matches, so anything generic buries itself.
-
-This mode requires `communityServer.enabled`, which is also the default. The config
-check refuses to deploy without it, since the server would have no address and no
-listing, leaving nobody able to reach it.
-
-Being listed means anyone can see your server exists. Your `serverPassword` is the
-only thing stopping them joining, so set one.
-
-### elastic-ip
-
-A fixed numeric address that never changes, for a private group who would rather
-type an address than appear in a public browser. Costs about $3.60/month, because a
-public IPv4 bills hourly whether the instance runs or not.
-
-Players paste `<ip>:8211` into Join Multiplayer Game. Consoles cannot do this, so
-pair it with `communityServer.enabled` if anyone plays on PS5 or Xbox.
-
-### route53
-
-Costs less and wakes on its own, at the price of needing a domain you control.
-
-A player's game looks up your hostname before it connects. Route 53 logs that
-lookup, and the log entry starts the server. Nobody has to press anything.
-
-You delegate one subdomain, say `palworld.yourdomain.com`, by adding NS records
-wherever your DNS lives now. Everything else in your domain keeps working, because
-delegation covers only the label you delegate. Your website and your email are not
-involved.
-
-Deploy first, because the nameservers do not exist until the hosted zone does. Then:
-
-```bash
-scripts/show-nameservers.sh       # prints the exact records to add
-scripts/sync-cloudflare-ns.sh     # or this, if your DNS is on Cloudflare
-```
-
-You add four records, all the same type and name, one per nameserver. Route 53 gives
-you a different set each time a zone is created, so use what the script prints
-rather than copying these:
-
-| Type | Name | Value | TTL |
-|---|---|---|---|
-| NS | `palworld` | `ns-161.awsdns-20.com` | 300 |
-| NS | `palworld` | `ns-569.awsdns-07.net` | 300 |
-| NS | `palworld` | `ns-1369.awsdns-43.org` | 300 |
-| NS | `palworld` | `ns-1544.awsdns-01.co.uk` | 300 |
-
-Some registrars want the label on its own, `palworld`, and others want the whole
-thing, `palworld.yourdomain.com`. On Cloudflare make sure the records are DNS only
-rather than proxied, though NS records cannot be proxied anyway.
-
-Check it took:
-
-```bash
-dig NS palworld.yourdomain.com +short
-```
-
-The first connection attempt always fails. That attempt is what wakes the server.
-Wait about two minutes and join again.
-
-Only PC players get this. Consoles never make a lookup you can watch, so they still
-need the [start page](#waking-the-server).
-
-Worth knowing: anything that resolves the name starts the server, including DNS
-scanners and uptime monitors. A spurious wake costs about 1.4 cents and then the
-server sleeps again, so it is self-limiting. Keep an eye on the Wake on connect
-graph in the dashboard if you suspect something is polling you.
-
-### Switching between them later
-
-Edit `addressing`, then run `scripts/deploy.sh`. The change only takes effect on that
-deploy. Your world is never at risk, since the save volume is not involved, but how
-players reach you does change, so tell them first.
-
-Moving **to** `route53` creates a hosted zone. Deploy, then run
-`scripts/show-nameservers.sh` and add the NS records, because the name will not
-resolve until you do.
-
-Moving **away from** `route53` deletes the hosted zone. Remove the NS records at your
-registrar afterwards, since they now point at a zone that no longer exists.
-
-Moving **to** `elastic-ip` allocates an address and starts the $3.60/month charge.
-Moving away releases it, and players need the new `ConnectAddress`.
-
-Every direction leaves the instance and its disks alone.
-
 ## Waking the server
 
-A sleeping server has to be started by something. In `route53` mode a joining PC
-player's DNS lookup does it. Otherwise, and for consoles in every mode, it is the
-start page.
-
-The start page is on by default in every addressing mode. It is a small web page
-with one button, served by a Lambda Function URL. The link comes out as
-`StartPageUrl` after a deploy and looks like
-`https://xyz.lambda-url.us-west-2.on.aws/?t=your-token`. Send it to whoever plays
+A sleeping server has to be started by something, and by default that is the start
+page. It is a small web page with one button, served by a Lambda Function URL, and on
+in every addressing mode. The link comes out as `StartPageUrl` after a deploy and looks
+like `https://xyz.lambda-url.us-west-2.on.aws/?t=your-token`. Send it to whoever plays
 with you. It reports what the server is doing and starts it if it is asleep.
+
+Consoles have no other way in. On [`route53`](#three-ways-players-reach-the-server)
+mode a joining PC player's DNS lookup also starts the server, which makes the page
+optional for them.
 
 | What you see | What it means |
 |---|---|
 | **Awake**, with a player count | Joinable now. When nobody is on it also says how long until it sleeps. |
 | **Starting up**, with elapsed time | On its way. Past four minutes it says why a first boot takes ten. |
-| **Asleep**, with how long | Nothing running. This is the one state with a button. |
-| **Going to sleep** | Mid-shutdown. Wait for it to finish, then start it again. |
-| **Not responding** | The box is up but the game is not answering, past `bootGraceMinutes`. The watchdog stops it shortly. |
+| **Asleep**, with how long | Nothing running. Has a button that starts it. |
+| **Going to sleep** | Mid-shutdown, when a start would be refused. Has a button that queues one. |
+| **Not responding** | The box is up but the game is not answering, past `bootGraceMinutes`. The watchdog stops it shortly, and a button queues a start for when it has. |
+| **Wake queued** | A queued start is waiting for the shutdown to finish. |
+
+### Queuing a start
+
+EC2 refuses `StartInstances` while an instance is stopping, so arriving during a
+shutdown used to mean retrying the button until it took. **Going to sleep** and
+**Not responding** instead offer a button that queues the start: the page keeps
+reloading itself and fires the start the moment the instance reaches `stopped`,
+which for an ordinary shutdown is within about fifteen seconds of it finishing.
+
+The queue is the `queue=1` flag on those reloads and nothing else — no state is
+stored, and no extra AWS resources exist to hold it. So it lasts precisely as long
+as the tab stays open, and it is spent as soon as it fires: the page it lands on
+drops the flag, so a tab left open overnight cannot start the server twice.
 
 ## Connecting to the server
 
@@ -505,6 +398,62 @@ a routine Canonical publish would silently replace your instance. Run
 
 The `Application=palworld` tag is load-bearing. All three Lambdas find the instance
 by it, and the IAM policies that let them start and stop it are conditioned on it.
+
+## Appendix
+
+Neither of these matters for a default deploy.
+
+### Three ways players reach the server
+
+Set `addressing` in your config, and pick before your first deploy, since changing it
+changes how players reach you.
+
+| Mode | Extra cost | Needs | Wakes on its own |
+|---|---|---|---|
+| `server-list` (default) | nothing | nothing | no |
+| `elastic-ip` | $3.60/mo | nothing | no |
+| `route53` | ~$0.50/mo | a domain you own | yes, for PC players |
+
+**`server-list`** puts the server in Palworld's Community Servers browser, where
+players search your `serverName`. Nothing is allocated, so a changing public IP stops
+mattering. Make the name distinctive, because an exact-name search returns only the
+first 200 matches. Being listed means anyone can see the server exists, so set a
+`serverPassword`.
+
+**`elastic-ip`** gives you a fixed address to hand out, at $3.60/month for a public
+IPv4 that bills whether the instance runs or not. Players paste `<ip>:8211` into Join
+Multiplayer Game. Consoles cannot, so keep `communityServer.enabled` on if anyone
+plays on PS5 or Xbox.
+
+**`route53`** costs less and wakes on its own. A player's game resolves your hostname
+before it connects, Route 53 logs that lookup, and the log entry starts the server.
+You delegate one subdomain by adding four NS records wherever your DNS lives now,
+which leaves the rest of your domain alone. Deploy first, since the nameservers do not
+exist until the hosted zone does, then run `scripts/show-nameservers.sh` for the exact
+records, or `scripts/sync-cloudflare-ns.sh` if your DNS is on Cloudflare. The first
+connection attempt after a sleep always fails, because that attempt is the wake. Only
+PC players get this, so consoles still need the [start page](#waking-the-server).
+Anything else that resolves the name wakes the server too, costing about 1.4 cents
+before it sleeps again.
+
+To switch modes later, edit `addressing` and deploy. Your world is never involved, but
+how players reach you changes, so tell them first. Moving to `route53` creates a
+hosted zone whose NS records you then add, and moving away deletes it, so pull those
+records at your registrar. Moving to `elastic-ip` starts the $3.60 charge, while
+moving away releases the address and changes `ConnectAddress`.
+
+### If you have more than one AWS account
+
+Skip this if you only have one. Some tooling sets `AWS_PROFILE` or
+`AWS_SESSION_TOKEN` in your shell, and that can send a deploy somewhere you did not
+intend. Two things help.
+
+Put explicit keys in `.env`. They clear the inherited values and always win. See
+`.env.example` for all three credential options.
+
+Then fill in `account` with your 12-digit account ID rather than leaving it empty.
+The CDK CLI refuses to deploy when your credentials resolve to a different account,
+so a mistake fails immediately instead of building a server in the wrong place.
 
 ## License
 

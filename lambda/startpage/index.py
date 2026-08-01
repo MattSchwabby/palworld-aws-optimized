@@ -12,6 +12,15 @@ on, and the player metric that idle-check.sh publishes every minute says whether
 the game itself is answering. Those diverge for the whole of a boot, which is the
 window a player is most likely to be staring at this page, so the page reports
 them separately: running is not the same as joinable.
+
+A wake can also be queued. EC2 rejects StartInstances while an instance is
+stopping, so somebody who arrives during a shutdown otherwise has to sit and
+retry the button until it takes. Queuing carries the intent in the query string
+of the reload this page already performs while the server is in transition, so
+the flag riding along on those reloads is the entire mechanism — no state is
+stored anywhere. It therefore lasts exactly as long as the tab stays open, which
+matches what it is for: somebody watching the page who wants to play as soon as
+the box frees up.
 """
 
 import html
@@ -87,7 +96,7 @@ PAGE = """<!doctype html>
 
 <p class="note">The server stops itself after {idle} minutes with nobody
 connected. Starting it again takes about two minutes.
-<a href="?t={token}">Refresh</a></p>
+<a href="{self_link}">Refresh</a></p>
 </body>
 </html>
 """
@@ -180,14 +189,38 @@ def _stopped_since(instance, now):
     return now - when
 
 
-def _render(headline, detail, facts=(), action="", tone="", refresh=False):
+def _self_link(queue):
+    """This page's own URL. Carrying `queue` here is what makes a queue persist.
+
+    Both the auto-reload and the manual Refresh link go through this, so a queued
+    wake survives either one and is dropped the moment a page stops asking for it.
+    """
+    link = f"?t={ACCESS_TOKEN}"
+    if queue:
+        link += "&queue=1"
+    return link
+
+
+def _form(label, **fields):
+    """A submit button as a GET form, so the page needs no JavaScript at all."""
+    hidden = "".join(
+        f'<input type="hidden" name="{html.escape(name)}" value="{html.escape(value)}">'
+        for name, value in fields.items()
+    )
+    return (
+        f'<form method="GET">{hidden}'
+        f'<button type="submit">{html.escape(label)}</button></form>'
+    )
+
+
+def _render(headline, detail, facts=(), action="", tone="", refresh=False, queue=False):
     rows = "".join(
         f"  <dt>{html.escape(label)}</dt><dd>{html.escape(value)}</dd>\n"
         for label, value in facts
     )
+    link = html.escape(_self_link(queue))
     meta = (
-        f'<meta http-equiv="refresh" content="{REFRESH_SECONDS}; '
-        f'url=?t={html.escape(ACCESS_TOKEN)}">\n'
+        f'<meta http-equiv="refresh" content="{REFRESH_SECONDS}; url={link}">\n'
         if refresh
         else ""
     )
@@ -200,7 +233,7 @@ def _render(headline, detail, facts=(), action="", tone="", refresh=False):
             detail=html.escape(detail),
             facts=rows,
             idle=IDLE_MINUTES,
-            token=html.escape(ACCESS_TOKEN),
+            self_link=link,
             action=action,
             tone=tone,
             refresh=meta,
@@ -241,6 +274,25 @@ def _booting_page(elapsed, already_running):
     )
 
 
+def _queued_page(detail, facts):
+    """A wake is wanted but cannot be requested yet, so the reload will do it.
+
+    Reached from either state that has to end in a stop before a start can go
+    through: a shutdown already under way, and a running box whose game is not
+    answering, which the watchdog will stop within a few minutes. Both converge on
+    'stopped', and the reload carrying queue=1 is what presses the button there.
+    """
+    return _render(
+        "Wake queued",
+        detail,
+        list(facts) + [("Queued", "yes, waiting for the shutdown to finish")],
+        "<button disabled>Wake queued…</button>",
+        tone="busy",
+        refresh=True,
+        queue=True,
+    )
+
+
 def handler(event, context):
     params = event.get("queryStringParameters") or {}
 
@@ -261,13 +313,13 @@ def handler(event, context):
         )
 
     state = instance["State"]["Name"]
-    start_button = (
-        f'<form method="GET"><input type="hidden" name="t" value="{html.escape(ACCESS_TOKEN)}">'
-        '<input type="hidden" name="start" value="1">'
-        '<button type="submit">Start the server</button></form>'
-    )
+    queued = params.get("queue") == "1"
+    start_button = _form("Start the server", t=ACCESS_TOKEN, start="1")
+    queue_button = _form("Start it again when it finishes", t=ACCESS_TOKEN, queue="1")
 
-    if params.get("start") == "1" and state == "stopped":
+    # A pressed button and an arriving queue are the same request once the box is
+    # actually stopped. The queue simply took a reload or two to get here.
+    if state == "stopped" and (params.get("start") == "1" or queued):
         try:
             ec2.start_instances(InstanceIds=[instance["InstanceId"]])
         except ClientError as error:
@@ -284,11 +336,20 @@ def handler(event, context):
         return _booting_page(now - instance["LaunchTime"], already_running=True)
 
     if state in ("stopping", "shutting-down"):
+        if queued:
+            return _queued_page(
+                "It is still saving and shutting down. This page will start it "
+                "the moment that finishes, usually within a minute. Leave the tab "
+                "open.",
+                _connection_facts(),
+            )
         return _render(
             "Going to sleep",
-            "It is saving and shutting down. Wait for that to finish, then start "
-            "it again.",
+            "It is saving and shutting down, and cannot be started until that "
+            "finishes. Queue a start and this page will press the button for you "
+            "as soon as it is allowed.",
             _connection_facts(),
+            queue_button,
             tone="busy",
             refresh=True,
         )
@@ -322,11 +383,21 @@ def handler(event, context):
         if uptime > timedelta(minutes=BOOT_GRACE_MINUTES):
             # Past the grace period a silent server is not a slow boot. This is
             # the same call the watchdog makes, and it stops the box shortly.
+            facts = _connection_facts() + [("Running for", _duration(uptime))]
+            if queued:
+                return _queued_page(
+                    "The game still is not answering. The watchdog stops the "
+                    "machine within a few minutes, and this page will start it "
+                    "again once that is done. Leave the tab open.",
+                    facts,
+                )
             return _render(
                 "Not responding",
                 "The machine is on but the game is not answering. It gets shut "
-                "down automatically, and then you can start it again.",
-                _connection_facts() + [("Running for", _duration(uptime))],
+                "down automatically within a few minutes. Queue a start and this "
+                "page will bring it back once that has happened.",
+                facts,
+                queue_button,
                 tone="busy",
                 refresh=True,
             )
